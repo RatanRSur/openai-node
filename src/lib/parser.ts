@@ -15,6 +15,7 @@ import {
 import { ResponseFormatJSONSchema } from '../resources/shared';
 import { ContentFilterFinishReasonError, LengthFinishReasonError, OpenAIError } from '../error';
 import { type ResponseFormatTextJSONSchemaConfig } from '../resources/responses/responses';
+import { debug } from '../core';
 
 type AnyChatCompletionCreateParams =
   | ChatCompletionCreateParams
@@ -167,34 +168,74 @@ export function parseChatCompletion<
   Params extends ChatCompletionCreateParams,
   ParsedT = ExtractParsedContentFromParams<Params>,
 >(completion: ChatCompletion, params: Params): ParsedChatCompletion<ParsedT> {
-  const choices: Array<ParsedChoice<ParsedT>> = completion.choices.map((choice): ParsedChoice<ParsedT> => {
+  debug('parseChatCompletion', 'Starting to parse chat completion');
+  debug('parseChatCompletion:input', { completion, params });
+  debug('parseChatCompletion:choices', `Processing ${completion.choices.length} choices`);
+
+  const choices: Array<ParsedChoice<ParsedT>> = completion.choices.map((choice, index): ParsedChoice<ParsedT> => {
+    debug('parseChatCompletion:choice', { index, choice });
+    debug('parseChatCompletion:finish_reason', choice.finish_reason);
+
     if (choice.finish_reason === 'length') {
+      debug('parseChatCompletion:error', 'Length finish reason detected, throwing LengthFinishReasonError');
       throw new LengthFinishReasonError();
     }
 
     if (choice.finish_reason === 'content_filter') {
+      debug('parseChatCompletion:error', 'Content filter finish reason detected, throwing ContentFilterFinishReasonError');
       throw new ContentFilterFinishReasonError();
     }
 
-    return {
+    const hasToolCalls = Boolean(choice.message.tool_calls);
+    debug('parseChatCompletion:tool_calls', { hasToolCalls });
+    if (hasToolCalls) {
+      debug('parseChatCompletion:tool_calls:data', choice.message.tool_calls);
+    }
+
+    const hasContent = Boolean(choice.message.content);
+    const hasRefusal = Boolean(choice.message.refusal);
+    debug('parseChatCompletion:content', { hasContent, hasRefusal });
+
+    if (hasContent) {
+      debug('parseChatCompletion:content:data', choice.message.content);
+    }
+
+    let parsedToolCalls: ParsedFunctionToolCall[] | undefined;
+    if (hasToolCalls) {
+      debug('parseChatCompletion:parsing_tool_calls', 'Starting to parse tool calls');
+      parsedToolCalls = choice.message.tool_calls?.map((toolCall, toolIndex) => {
+        debug('parseChatCompletion:tool_call', { toolIndex, toolCall });
+        const parsed = parseToolCall(params, toolCall);
+        debug('parseChatCompletion:tool_call:parsed', { toolIndex, parsed });
+        return parsed;
+      });
+    }
+
+    let parsedContent = null;
+    if (hasContent && !hasRefusal) {
+      debug('parseChatCompletion:parsing_content', 'Attempting to parse response format');
+      parsedContent = parseResponseFormat(params, choice.message.content as string) as ParsedT | null;
+      debug('parseChatCompletion:content:parsed', parsedContent);
+    }
+
+    const result = {
       ...choice,
       message: {
         ...choice.message,
-        ...(choice.message.tool_calls ?
-          {
-            tool_calls:
-              choice.message.tool_calls?.map((toolCall) => parseToolCall(params, toolCall)) ?? undefined,
-          }
-        : undefined),
-        parsed:
-          choice.message.content && !choice.message.refusal ?
-            parseResponseFormat(params, choice.message.content)
-          : null,
+        ...(choice.message.tool_calls ? {
+          tool_calls: parsedToolCalls as ParsedFunctionToolCall[],
+        } : {}),
+        parsed: parsedContent,
       },
     };
+
+    debug('parseChatCompletion:choice:result', { index, result });
+    return result;
   });
 
-  return { ...completion, choices };
+  const result = { ...completion, choices };
+  debug('parseChatCompletion:result', result);
+  return result;
 }
 
 function parseResponseFormat<

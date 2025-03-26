@@ -1194,7 +1194,7 @@ export function debug(action: string, ...args: any[]) {
 
       return modifiedArg ?? arg;
     });
-    console.log(`OpenAI:DEBUG:${action}`, ...modifiedArgs);
+    console.debug(`OpenAI:DEBUG:${action}`, ...modifiedArgs);
   }
 }
 
